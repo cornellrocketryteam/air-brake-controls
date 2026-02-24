@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python run_controller.py:*)",
+      "Bash(cd:*)",
+      "Bash(head:*)",
+      "Bash(grep:*)",
+      "Bash(tail:*)",
+      "Bash(cd \"/c/Users/sonak/Documents/Cornell/Cornell Rocketry/airbrake_controls_2/controller_in_rust\" && cargo build 2>&1)",
+      "Bash(~/.cargo/bin/cargo build:*)",
+      "Bash(/c/Users/sonak/.cargo/bin/cargo.exe build:*)",
+      "Bash(cp:*)"
+    ]
+  }
+}

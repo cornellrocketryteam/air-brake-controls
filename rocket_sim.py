@@ -1,5 +1,5 @@
 import math
-def rocket_sim(x, v, tilt_deg,airbrake):
+def rocket_sim(x, v, tilt_deg, airbrake, verbose=False):
     # --------------------
     # Constants
     # --------------------
@@ -40,7 +40,7 @@ def rocket_sim(x, v, tilt_deg,airbrake):
 
 
     def drag_coeff_area(deploy):
-        Cd = 0.5 + 1.5 * deploy
+        Cd = 0.3  # Constant across all deployments
         A = 0.01 + 0.04 * deploy
         return Cd, A
 
@@ -74,7 +74,8 @@ def rocket_sim(x, v, tilt_deg,airbrake):
 
         # --- Apogee condition ---
         if v_next < 0:
-            print(f"Apogee reached at {x:.2f} m after {time:.2f} s")
+            if verbose:
+                print(f"Apogee reached at {x:.2f} m after {time:.2f} s")
             break
 
         # --- Update ---

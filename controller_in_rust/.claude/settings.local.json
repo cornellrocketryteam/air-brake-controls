@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"/c/Users/sonak/Documents/Cornell/Cornell Rocketry/airbrake_controls_2/controller_in_rust\" && cargo build --release 2>&1)"
+    ]
+  }
+}

@@ -30,14 +30,14 @@ AIRBRAKE_MIN = 0.0
 AIRBRAKE_MAX = 1.0
 AIRBRAKE_RETRACT_STEP = 0.05  # Small step for adjustment loop
 
-# Airbrake aerodynamic characteristics (linear interpolation)
-# Deployment 0.0 -> Area = 1 m², Cd = 0.2
-# Deployment 0.5 -> Area = 2 m², Cd = 0.3
-# Deployment 1.0 -> Area = 3 m², Cd = 0.4
-AIRBRAKE_AREA_MIN = 1.0      # Area at 0% deployment (m²)
-AIRBRAKE_AREA_MAX = 3.0      # Area at 100% deployment (m²)
-AIRBRAKE_CD_MIN = 0.2        # Cd at 0% deployment
-AIRBRAKE_CD_MAX = 0.4        # Cd at 100% deployment
+# Airbrake aerodynamic characteristics
+# Cd is constant at 0.3 across all deployments.
+# Area varies linearly with deployment:
+#   Deployment 0.0 -> Area = 0.01 m²
+#   Deployment 1.0 -> Area = 0.05 m²
+AIRBRAKE_CD = 0.3            # Constant drag coefficient
+AIRBRAKE_AREA_MIN = 0.01     # Area at 0% deployment (m²)
+AIRBRAKE_AREA_MAX = 0.05     # Area at 100% deployment (m²)
 
 # Failsafe thresholds
 MAX_TILT_DEG = 50.0
@@ -45,10 +45,13 @@ MAX_TILT_DEG = 50.0
 # Launch detection threshold
 LAUNCH_ACCEL_THRESHOLD = 5.0  # m/s^2 - acceleration to detect launch
 
-# PID tuning parameters (adjust based on testing)
-KP = 0.001
-KI = 0.0001
-KD = 0.0005
+# PID tuning parameters
+KP = 0.008   # Proportional gain
+KI = 0.0002  # Integral gain
+KD = 0.001   # Derivative gain
+
+# Converts PID apogee error (m) to a drag force adjustment (N)
+DRAG_SCALE_FACTOR = 5.0
 
 
 # -----------------------------------------------------------------------------
@@ -143,8 +146,8 @@ def deployment_to_area(deployment):
     Calculate airbrake frontal area as function of deployment.
 
     Linear interpolation:
-        0% deployment -> 1 m²
-        100% deployment -> 3 m²
+        0% deployment -> 0.01 m²
+        100% deployment -> 0.05 m²
 
     Args:
         deployment: Airbrake deployment (0.0 to 1.0)
@@ -152,17 +155,13 @@ def deployment_to_area(deployment):
     Returns:
         Frontal area in m²
     """
-    # A(d) = A_min + (A_max - A_min) * d = 1 + 2*d
+    # A(d) = A_min + (A_max - A_min) * d = 0.01 + 0.04*d
     return AIRBRAKE_AREA_MIN + (AIRBRAKE_AREA_MAX - AIRBRAKE_AREA_MIN) * deployment
 
 
 def deployment_to_cd(deployment):
     """
-    Calculate drag coefficient as function of deployment.
-
-    Linear interpolation:
-        0% deployment -> Cd = 0.2
-        100% deployment -> Cd = 0.4
+    Return drag coefficient (constant at 0.3 for all deployments).
 
     Args:
         deployment: Airbrake deployment (0.0 to 1.0)
@@ -170,8 +169,7 @@ def deployment_to_cd(deployment):
     Returns:
         Drag coefficient (dimensionless)
     """
-    # Cd(d) = Cd_min + (Cd_max - Cd_min) * d = 0.2 + 0.2*d
-    return AIRBRAKE_CD_MIN + (AIRBRAKE_CD_MAX - AIRBRAKE_CD_MIN) * deployment
+    return AIRBRAKE_CD
 
 
 def deployment_to_drag(deployment, velocity, altitude):
@@ -200,15 +198,11 @@ def drag_force_to_deployment(drag_force_n, velocity_mps, altitude_m):
     Convert desired drag force to airbrake deployment percentage.
 
     Solves the drag equation for deployment:
-        F_d = 0.5 * rho * v² * Cd(d) * A(d)
+        F_d = 0.5 * rho * v² * Cd * A(d)
 
-    Where:
-        Cd(d) = 0.2 + 0.2*d
-        A(d) = 1 + 2*d
-
-    Expanding: F_d = k * (0.4*d² + 0.6*d + 0.2) where k = 0.5 * rho * v²
-
-    Solving quadratic: d = (-0.6 + sqrt(0.04 + 1.6*F_d/k)) / 0.8
+    With constant Cd = 0.3 and A(d) = 0.01 + 0.04*d, this is linear in d:
+        F_d = k * 0.3 * (0.01 + 0.04*d)   where k = 0.5 * rho * v²
+        d = (F_d / (k * 0.3) - 0.01) / 0.04
 
     Args:
         drag_force_n: Desired drag force in Newtons
@@ -227,17 +221,8 @@ def drag_force_to_deployment(drag_force_n, velocity_mps, altitude_m):
     if k <= 0:
         return AIRBRAKE_MIN
 
-    # Quadratic coefficients for: 0.4*d² + 0.6*d + (0.2 - F_d/k) = 0
-    # Using: d = (-0.6 + sqrt(0.04 + 1.6*F_d/k)) / 0.8
-    discriminant = 0.04 + 1.6 * drag_force_n / k
+    deployment = (drag_force_n / (k * AIRBRAKE_CD) - AIRBRAKE_AREA_MIN) / (AIRBRAKE_AREA_MAX - AIRBRAKE_AREA_MIN)
 
-    if discriminant < 0:
-        # No real solution - drag force too low, return minimum deployment
-        return AIRBRAKE_MIN
-
-    deployment = (-0.6 + math.sqrt(discriminant)) / 0.8
-
-    # Clamp to valid range
     return max(AIRBRAKE_MIN, min(AIRBRAKE_MAX, deployment))
 
 
@@ -313,8 +298,9 @@ class AirbrakeController:
         self.ground_temp = ground_temp
         self.sensor_buffer = SensorBuffer(size=3)
 
-        # PID controller: output limits correspond to airbrake deployment range
-        self.pid = PID(KP, KI, KD, output_limits=(AIRBRAKE_MIN, AIRBRAKE_MAX))
+        # PID output can be positive (retract) or negative (deploy more).
+        # Deployment clamping is handled inside calculate_drag_adjustment.
+        self.pid = PID(KP, KI, KD, output_limits=(-AIRBRAKE_MAX, AIRBRAKE_MAX))
 
         # State variables
         self.current_airbrake = 0.0
@@ -324,6 +310,99 @@ class AirbrakeController:
         self.coast_started = False
         self.connection_lost = False
         self.last_data_time = 0.0
+        self._previous_time = None  # For dt calculation in step()
+
+    def step(self, sensor_data):
+        """
+        Process one sensor reading and return current airbrake deployment.
+
+        Args:
+            sensor_data: dict with keys: time, pressure, gyro_x, gyro_y, gyro_z
+
+        Returns:
+            Current airbrake deployment (0.0 to 1.0)
+        """
+        current_time = sensor_data['time']
+
+        if self._previous_time is not None:
+            dt = current_time - self._previous_time
+        else:
+            dt = DT
+        self._previous_time = current_time
+        self.last_data_time = current_time
+
+        processed = self.process_sensors(sensor_data)
+        altitude = processed['altitude']
+
+        self.sensor_buffer.add(
+            altitude,
+            (processed['gyro_x'], processed['gyro_y'], processed['gyro_z']),
+            current_time
+        )
+
+        if self.launched:
+            self.integrate_gyroscope(processed['gyro_x'], processed['gyro_y'], dt)
+
+        calculated_accel = self.sensor_buffer.get_acceleration()
+
+        if self.phase == "pre_launch":
+            if self.sensor_buffer.is_ready() and calculated_accel > LAUNCH_ACCEL_THRESHOLD:
+                self.phase = "launch"
+                self.launched = True
+                print(f"[{current_time:.2f}s] Launch detected! (accel={calculated_accel:.1f} m/s²)")
+            return self.current_airbrake
+
+        if self.phase == "launch":
+            if calculated_accel < 0:
+                self.phase = "coast_init"
+                print(f"[{current_time:.2f}s] Coast phase detected. Initializing control.")
+            return self.current_airbrake
+
+        if self.phase == "coast_init":
+            if self.sensor_buffer.is_ready():
+                self.phase = "coast_active"
+                height = altitude
+                velocity = self.sensor_buffer.get_velocity()
+                tilt = self.integrated_tilt
+
+                predicted_apogee = rocket_sim(height, velocity, tilt, 0.0)
+                print(f"[{current_time:.2f}s] Predicted apogee (no brakes): {predicted_apogee:.1f} m")
+
+                if predicted_apogee <= self.target_apogee:
+                    print(f"[{current_time:.2f}s] Predicted apogee too low. Not deploying brakes.")
+                    self.current_airbrake = AIRBRAKE_MIN
+                else:
+                    self.current_airbrake = self.airbrake_adjustment_loop(height, velocity, tilt)
+                    print(f"[{current_time:.2f}s] Initial airbrake deployment: {self.current_airbrake:.1%}")
+                    self.command_airbrakes(self.current_airbrake)
+            return self.current_airbrake
+
+        if self.phase == "coast_active":
+            height = altitude
+            velocity = self.sensor_buffer.get_velocity()
+            tilt = self.integrated_tilt
+
+            if velocity <= 0:
+                print(f"[{current_time:.2f}s] Apogee detected by controller at {height:.1f} m. Retracting.")
+                self.current_airbrake = AIRBRAKE_MIN
+                self.command_airbrakes(self.current_airbrake)
+                return self.current_airbrake
+
+            should_retract, message = self.check_failsafes(velocity)
+            if should_retract:
+                print(f"[{current_time:.2f}s] {message}")
+                self.current_airbrake = AIRBRAKE_MIN
+                self.command_airbrakes(self.current_airbrake)
+                return self.current_airbrake
+
+            predicted_apogee = rocket_sim(height, velocity, tilt, self.current_airbrake)
+            pid_output = self.pid.update(self.target_apogee, predicted_apogee, dt)
+            self.current_airbrake = self.calculate_drag_adjustment(
+                pid_output, velocity, height, self.current_airbrake
+            )
+            self.command_airbrakes(self.current_airbrake)
+
+        return self.current_airbrake
 
     def read_csv_data(self, csv_path):
         """
@@ -412,29 +491,26 @@ class AirbrakeController:
 
     def airbrake_adjustment_loop(self, height, velocity, tilt):
         """
-        Initial airbrake adjustment loop.
-        Starts with max deployment and retracts until predicted apogee < target.
-        Finds the deployment level where target can be reached with constant deployment.
+        Binary search for the minimum deployment where predicted apogee >= target.
+
+        Each iteration halves the search interval; 20 iterations gives
+        precision of ~0.0001 (0.01% deployment).
 
         Returns the optimal airbrake deployment level.
         """
-        airbrake = AIRBRAKE_MAX
+        lo = AIRBRAKE_MIN
+        hi = AIRBRAKE_MAX
 
-        while airbrake > AIRBRAKE_MIN:
-            # Predict apogee with candidate deployment
-            airbrake_candidate = airbrake - AIRBRAKE_RETRACT_STEP
-            airbrake_candidate = max(airbrake_candidate, AIRBRAKE_MIN)
-
-            predicted_apogee = rocket_sim(height, velocity, tilt, airbrake_candidate)
-
+        for _ in range(20):
+            mid = (lo + hi) / 2.0
+            predicted_apogee = rocket_sim(height, velocity, tilt, mid)
             if predicted_apogee >= self.target_apogee:
-                # Safe to retract further
-                airbrake = airbrake_candidate
+                lo = mid   # this deployment still undershoots drag, can add more
             else:
-                # Stop retraction; this is the optimal point
-                break
+                hi = mid   # too much drag, back off
 
-        return airbrake
+        # lo is the highest deployment where predicted apogee just meets target
+        return min(lo, AIRBRAKE_MAX)
 
     def calculate_drag_adjustment(self, pid_output, current_velocity, current_altitude, current_deployment):
         """
@@ -466,8 +542,7 @@ class AirbrakeController:
         # We need to convert this to a drag force change
         # Positive PID = apogee too low = reduce drag
         # Negative PID = apogee too high = increase drag
-        drag_scale_factor = 10.0  # Tunable: converts apogee error to drag force (N per meter error)
-        target_drag = current_drag - (pid_output * drag_scale_factor)
+        target_drag = current_drag - (pid_output * DRAG_SCALE_FACTOR)
 
         # Ensure target drag is non-negative
         target_drag = max(0.0, target_drag)
@@ -561,8 +636,6 @@ class AirbrakeController:
                         self.current_airbrake = AIRBRAKE_MIN
                     else:
                         print(f"[{current_time:.2f}s] Predicted apogee > target. Running adjustment loop.")
-                        # Max out airbrakes first, then run adjustment loop
-                        self.current_airbrake = AIRBRAKE_MAX
                         self.current_airbrake = self.airbrake_adjustment_loop(
                             height, velocity, tilt
                         )
