@@ -64,6 +64,7 @@ impl SensorBuffer {
         }
     }
 
+    /// Push a reading; drops oldest if buffer is full.
     pub fn add(&mut self, altitude: f64, gyro: (f64, f64, f64), timestamp: f64) {
         if self.altitudes.len() >= self.size {
             self.altitudes.pop_front();
@@ -75,10 +76,12 @@ impl SensorBuffer {
         self.timestamps.push_back(timestamp);
     }
 
+    /// True once we have ≥3 readings (enough for acceleration).
     pub fn is_ready(&self) -> bool {
         self.altitudes.len() >= 3
     }
 
+    /// Backward-difference velocity from last two altitude readings.
     pub fn get_velocity(&self) -> f64 {
         let n = self.altitudes.len();
         if n < 2 {
@@ -89,6 +92,7 @@ impl SensorBuffer {
         if dt > 0.0 { dh / dt } else { 0.0 }
     }
 
+    /// Second finite-difference acceleration from last three readings.
     pub fn get_acceleration(&self) -> f64 {
         let n = self.altitudes.len();
         if n < 3 {
@@ -113,6 +117,7 @@ impl SensorBuffer {
 // -----------------------------------------------------------------------------
 // Aerodynamic helpers
 // -----------------------------------------------------------------------------
+/// h = (T0/L)·[1 − (P/P0)^(RL/g)]
 pub fn pressure_to_altitude(pressure_pa: f64, p0: f64, t0: f64) -> f64 {
     if pressure_pa <= 0.0 {
         return 0.0;
@@ -122,26 +127,31 @@ pub fn pressure_to_altitude(pressure_pa: f64, p0: f64, t0: f64) -> f64 {
     altitude.max(0.0)
 }
 
+/// T = T0 − L·h, clamped ≥ 1 K.
 pub fn altitude_to_temperature(altitude: f64, t0: f64) -> f64 {
     (t0 - L * altitude).max(1.0)
 }
 
+/// ISA air density ρ = P/(R·T) at given altitude.
 pub fn air_density(altitude: f64, p0: f64, t0: f64) -> f64 {
     let t = altitude_to_temperature(altitude, t0);
     let p = p0 * (t / t0).powf(G / (R * L));
     (p / (R * t)).max(0.001)
 }
 
+/// Linear interpolation: deployment (0–1) → airbrake frontal area (m²).
 pub fn deployment_to_area(deployment: f64) -> f64 {
     AIRBRAKE_AREA_MIN + (AIRBRAKE_AREA_MAX - AIRBRAKE_AREA_MIN) * deployment
 }
 
+/// Fd = ½ρv²·Cd·A for airbrake at given deployment.
 pub fn deployment_to_drag(deployment: f64, velocity: f64, altitude: f64, ground_pressure: f64) -> f64 {
     let rho = air_density(altitude, ground_pressure, GROUND_TEMP_K);
     let a = deployment_to_area(deployment);
     0.5 * rho * velocity * velocity * AIRBRAKE_CD * a
 }
 
+/// Inverse of deployment_to_drag: solve for deployment given a target drag force.
 pub fn drag_force_to_deployment(drag_force_n: f64, velocity_mps: f64, altitude_m: f64, ground_pressure: f64) -> f64 {
     if velocity_mps <= 0.0 {
         return AIRBRAKE_MIN;
@@ -200,12 +210,14 @@ impl AirbrakeController {
         }
     }
 
+    /// Convert raw pressure → altitude using calibrated ground pressure.
     fn process_sensors(&self, sensor_data: &SensorData) -> (f64, f64, f64, f64) {
         let altitude =
             pressure_to_altitude(sensor_data.pressure, self.ground_pressure, self.ground_temp);
         (altitude, sensor_data.gyro_x, sensor_data.gyro_y, sensor_data.gyro_z)
     }
 
+    /// Dead-reckon tilt by integrating gyro rates; magnitude = √(x²+y²).
     fn integrate_gyroscope(&mut self, gyro_x: f64, gyro_y: f64, dt: f64) {
         self.integrated_tilt_x += gyro_x * dt;
         self.integrated_tilt_y += gyro_y * dt;
@@ -214,6 +226,7 @@ impl AirbrakeController {
             .sqrt();
     }
 
+    /// Retract airbrakes if tilt > MAX_TILT_DEG or comms lost.
     fn check_failsafes(&self, current_velocity: f64) -> Option<String> {
         if self.integrated_tilt > MAX_TILT_DEG {
             return Some(format!(
@@ -227,6 +240,7 @@ impl AirbrakeController {
         None
     }
 
+    /// Binary search (20 iters) for deployment that hits target apogee.
     fn airbrake_adjustment_loop(&self, height: f64, velocity: f64, tilt: f64) -> f64 {
         let mut lo = AIRBRAKE_MIN;
         let mut hi = AIRBRAKE_MAX;
@@ -242,6 +256,7 @@ impl AirbrakeController {
         lo.min(AIRBRAKE_MAX)
     }
 
+    /// Map PID output to a new deployment via drag-force adjustment.
     fn calculate_drag_adjustment(
         &self,
         pid_output: f64,
@@ -255,6 +270,7 @@ impl AirbrakeController {
         drag_force_to_deployment(target_drag, current_velocity, current_altitude, self.ground_pressure)
     }
 
+    /// Clamp and store the deployment command.
     fn command_airbrakes(&mut self, deployment: f64) {
         self.current_airbrake = deployment.clamp(AIRBRAKE_MIN, AIRBRAKE_MAX);
     }

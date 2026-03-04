@@ -1,3 +1,4 @@
+/// PID controller with output clamping. D term skipped on first call.
 pub struct Pid {
     kp: f64,
     ki: f64,
@@ -23,6 +24,7 @@ impl Pid {
         }
     }
 
+    /// Compute clamped P+I+D output. error = setpoint − measurement.
     pub fn update(&mut self, setpoint: f64, measurement: f64, dt: f64) -> f64 {
         let error = setpoint - measurement;
 
