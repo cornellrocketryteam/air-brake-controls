@@ -1,7 +1,11 @@
 """
 Airbrake Controller Architecture
-Reads raw sensor data from BMP390 barometer and ICM-42688-P gyroscope via CSV.
+Reads raw sensor data from BMP390 barometer and ICM-42688-P gyroscope.
 Manages airbrake deployment using PID control and rocket simulation for apogee prediction.
+
+The controller receives flight phase ("boost" or "coast") from the flight computer / simulator,
+rather than detecting phases internally. This mirrors the real rocket architecture where
+the flight computer determines state and passes it to the airbrake controller.
 """
 
 import csv
@@ -21,29 +25,33 @@ R = 287.05  # Specific gas constant for dry air (J/(kg·K))
 G = 9.80665  # Gravity (m/s^2)
 L = 0.0065  # Temperature lapse rate (K/m) - Metric for how T changes with Height
 
-# Ground conditions (calibrate before launch)
+# Ground conditions (auto-calibrated from first barometer reading)
 GROUND_TEMP_K = 288.15  # Ground temperature (K) - standard sea level
-GROUND_PRESSURE_PA = 101325.0  # Ground pressure (Pa) - standard sea level
 
 # Airbrake limits
 AIRBRAKE_MIN = 0.0
 AIRBRAKE_MAX = 1.0
 AIRBRAKE_RETRACT_STEP = 0.05  # Small step for adjustment loop
 
+# Rocket mass
+MASS = 113.0  # kg
+
+# Rocket body aerodynamics (6-inch diameter)
+BODY_CD = 0.4
+BODY_DIAMETER = 0.1524       # 6 inches in meters
+BODY_AREA = math.pi * (BODY_DIAMETER / 2) ** 2  # 0.01824 m²
+
 # Airbrake aerodynamic characteristics
-# Cd is constant at 0.3 across all deployments.
+# Cd is constant at 0.4 across all deployments.
 # Area varies linearly with deployment:
-#   Deployment 0.0 -> Area = 0.01 m²
-#   Deployment 1.0 -> Area = 0.05 m²
-AIRBRAKE_CD = 0.3            # Constant drag coefficient
-AIRBRAKE_AREA_MIN = 0.01     # Area at 0% deployment (m²)
-AIRBRAKE_AREA_MAX = 0.05     # Area at 100% deployment (m²)
+#   Deployment 0.0 -> Area = 2.86479 in² = 0.001848 m²
+#   Deployment 1.0 -> Area = 34 in²      = 0.021935 m²
+AIRBRAKE_CD = 0.4            # Constant drag coefficient
+AIRBRAKE_AREA_MIN = 0.001848   # Area at 0% deployment (m²) — 2.86479 in²
+AIRBRAKE_AREA_MAX = 0.021935   # Area at 100% deployment (m²) — 34 in²
 
 # Failsafe thresholds
 MAX_TILT_DEG = 50.0
-
-# Launch detection threshold
-LAUNCH_ACCEL_THRESHOLD = 5.0  # m/s^2 - acceleration to detect launch
 
 # PID tuning parameters
 KP = 0.008   # Proportional gain
@@ -58,7 +66,7 @@ DRAG_SCALE_FACTOR = 5.0
 # Sensor Conversion Functions
 # -----------------------------------------------------------------------------
 
-def pressure_to_altitude(pressure_pa, P0=GROUND_PRESSURE_PA, T0=GROUND_TEMP_K):
+def pressure_to_altitude(pressure_pa, P0, T0=GROUND_TEMP_K):
     """
     Convert BMP390 pressure reading to altitude using barometric formula.
 
@@ -119,7 +127,7 @@ def altitude_to_temperature(altitude, T0=GROUND_TEMP_K):
     return max(T, 1.0)  # Prevent non-positive temperature
 
 
-def air_density(altitude, P0=GROUND_PRESSURE_PA, T0=GROUND_TEMP_K):
+def air_density(altitude, P0, T0=GROUND_TEMP_K):
     """
     Calculate air density at a given altitude using ISA model.
 
@@ -172,7 +180,7 @@ def deployment_to_cd(deployment):
     return AIRBRAKE_CD
 
 
-def deployment_to_drag(deployment, velocity, altitude):
+def deployment_to_drag(deployment, velocity, altitude, ground_pressure):
     """
     Calculate drag force for a given deployment, velocity, and altitude.
 
@@ -182,32 +190,33 @@ def deployment_to_drag(deployment, velocity, altitude):
         deployment: Airbrake deployment (0.0 to 1.0)
         velocity: Velocity in m/s
         altitude: Altitude in meters
+        ground_pressure: Ground-level pressure in Pascals
 
     Returns:
         Drag force in Newtons
     """
-    rho = air_density(altitude)
+    rho = air_density(altitude, ground_pressure)
     Cd = deployment_to_cd(deployment)
     A = deployment_to_area(deployment)
 
     return 0.5 * rho * velocity**2 * Cd * A
 
 
-def drag_force_to_deployment(drag_force_n, velocity_mps, altitude_m):
+def drag_force_to_deployment(drag_force_n, velocity_mps, altitude_m, ground_pressure):
     """
     Convert desired drag force to airbrake deployment percentage.
 
     Solves the drag equation for deployment:
         F_d = 0.5 * rho * v² * Cd * A(d)
 
-    With constant Cd = 0.3 and A(d) = 0.01 + 0.04*d, this is linear in d:
-        F_d = k * 0.3 * (0.01 + 0.04*d)   where k = 0.5 * rho * v²
-        d = (F_d / (k * 0.3) - 0.01) / 0.04
+    With constant Cd and A(d) = A_min + (A_max - A_min)*d, this is linear in d:
+        d = (F_d / (k * Cd) - A_min) / (A_max - A_min)   where k = 0.5 * rho * v²
 
     Args:
         drag_force_n: Desired drag force in Newtons
         velocity_mps: Current velocity in m/s
         altitude_m: Current altitude in meters
+        ground_pressure: Ground-level pressure in Pascals
 
     Returns:
         Required deployment percentage (0.0 to 1.0), clamped to valid range
@@ -215,7 +224,7 @@ def drag_force_to_deployment(drag_force_n, velocity_mps, altitude_m):
     if velocity_mps <= 0:
         return AIRBRAKE_MIN
 
-    rho = air_density(altitude_m)
+    rho = air_density(altitude_m, ground_pressure)
     k = 0.5 * rho * velocity_mps**2
 
     if k <= 0:
@@ -285,16 +294,18 @@ class AirbrakeController:
     """
     Main controller for airbrake system.
 
-    Phases:
-    1. Pre-launch: Wait for launch detection (calculated accel > threshold)
-    2. Launch: Integrate gyroscope data for tilt, wait for coast
-    3. Coast (accel < 0): Active control with PID and simulation
+    Receives flight phase from the flight computer / simulator:
+        "boost" — motor burning, integrate gyroscope for tilt estimation
+        "coast" — motor burned out, active PID airbrake control
+
+    The controller does NOT detect phases internally; it trusts the
+    passed-in phase, just like the real flight computer architecture.
     """
 
-    def __init__(self, target_apogee=TARGET_APOGEE, ground_pressure=GROUND_PRESSURE_PA,
+    def __init__(self, target_apogee=TARGET_APOGEE, ground_pressure=None,
                  ground_temp=GROUND_TEMP_K):
         self.target_apogee = target_apogee
-        self.ground_pressure = ground_pressure
+        self.ground_pressure = ground_pressure  # None = auto-calibrate from first reading
         self.ground_temp = ground_temp
         self.sensor_buffer = SensorBuffer(size=3)
 
@@ -304,10 +315,10 @@ class AirbrakeController:
 
         # State variables
         self.current_airbrake = 0.0
-        self.integrated_tilt = 0.0  # Accumulated tilt from gyroscope (degrees)
-        self.phase = "pre_launch"
-        self.launched = False
-        self.coast_started = False
+        self.integrated_tilt_x = 0.0  # Accumulated tilt around X-axis (degrees)
+        self.integrated_tilt_y = 0.0  # Accumulated tilt around Y-axis (degrees)
+        self.integrated_tilt = 0.0  # Total tilt magnitude (degrees)
+        self.coast_initialized = False  # True after first coast step initializes control
         self.connection_lost = False
         self.last_data_time = 0.0
         self._previous_time = None  # For dt calculation in step()
@@ -317,12 +328,20 @@ class AirbrakeController:
         Process one sensor reading and return current airbrake deployment.
 
         Args:
-            sensor_data: dict with keys: time, pressure, gyro_x, gyro_y, gyro_z
+            sensor_data: dict with keys:
+                time, pressure, gyro_x, gyro_y, gyro_z,
+                phase ("boost" or "coast")
 
         Returns:
             Current airbrake deployment (0.0 to 1.0)
         """
         current_time = sensor_data['time']
+        phase = sensor_data['phase']
+
+        # Auto-calibrate ground pressure from first reading
+        if self.ground_pressure is None:
+            self.ground_pressure = sensor_data['pressure']
+            print(f"[{current_time:.2f}s] Ground pressure calibrated: {self.ground_pressure:.1f} Pa")
 
         if self._previous_time is not None:
             dt = current_time - self._previous_time
@@ -340,44 +359,36 @@ class AirbrakeController:
             current_time
         )
 
-        if self.launched:
+        # --- Boost phase: integrate gyro for tilt, no airbrake control ---
+        if phase == "boost":
+            self.integrate_gyroscope(processed['gyro_x'], processed['gyro_y'], dt)
+            return self.current_airbrake
+
+        # --- Coast phase: active airbrake control ---
+        if phase == "coast":
             self.integrate_gyroscope(processed['gyro_x'], processed['gyro_y'], dt)
 
-        calculated_accel = self.sensor_buffer.get_acceleration()
+            # First coast step: initialize control
+            if not self.coast_initialized:
+                if self.sensor_buffer.is_ready():
+                    self.coast_initialized = True
+                    height = altitude
+                    velocity = self.sensor_buffer.get_velocity()
+                    tilt = self.integrated_tilt
 
-        if self.phase == "pre_launch":
-            if self.sensor_buffer.is_ready() and calculated_accel > LAUNCH_ACCEL_THRESHOLD:
-                self.phase = "launch"
-                self.launched = True
-                print(f"[{current_time:.2f}s] Launch detected! (accel={calculated_accel:.1f} m/s²)")
-            return self.current_airbrake
+                    predicted_apogee = rocket_sim(height, velocity, tilt, 0.0, self.ground_pressure)
+                    print(f"[{current_time:.2f}s] Predicted apogee (no brakes): {predicted_apogee:.1f} m")
 
-        if self.phase == "launch":
-            if calculated_accel < 0:
-                self.phase = "coast_init"
-                print(f"[{current_time:.2f}s] Coast phase detected. Initializing control.")
-            return self.current_airbrake
+                    if predicted_apogee <= self.target_apogee:
+                        print(f"[{current_time:.2f}s] Predicted apogee too low. Not deploying brakes.")
+                        self.current_airbrake = AIRBRAKE_MIN
+                    else:
+                        self.current_airbrake = self.airbrake_adjustment_loop(height, velocity, tilt)
+                        print(f"[{current_time:.2f}s] Initial airbrake deployment: {self.current_airbrake:.1%}")
+                        self.command_airbrakes(self.current_airbrake)
+                return self.current_airbrake
 
-        if self.phase == "coast_init":
-            if self.sensor_buffer.is_ready():
-                self.phase = "coast_active"
-                height = altitude
-                velocity = self.sensor_buffer.get_velocity()
-                tilt = self.integrated_tilt
-
-                predicted_apogee = rocket_sim(height, velocity, tilt, 0.0)
-                print(f"[{current_time:.2f}s] Predicted apogee (no brakes): {predicted_apogee:.1f} m")
-
-                if predicted_apogee <= self.target_apogee:
-                    print(f"[{current_time:.2f}s] Predicted apogee too low. Not deploying brakes.")
-                    self.current_airbrake = AIRBRAKE_MIN
-                else:
-                    self.current_airbrake = self.airbrake_adjustment_loop(height, velocity, tilt)
-                    print(f"[{current_time:.2f}s] Initial airbrake deployment: {self.current_airbrake:.1%}")
-                    self.command_airbrakes(self.current_airbrake)
-            return self.current_airbrake
-
-        if self.phase == "coast_active":
+            # Active coast control
             height = altitude
             velocity = self.sensor_buffer.get_velocity()
             tilt = self.integrated_tilt
@@ -395,7 +406,7 @@ class AirbrakeController:
                 self.command_airbrakes(self.current_airbrake)
                 return self.current_airbrake
 
-            predicted_apogee = rocket_sim(height, velocity, tilt, self.current_airbrake)
+            predicted_apogee = rocket_sim(height, velocity, tilt, self.current_airbrake, self.ground_pressure)
             pid_output = self.pid.update(self.target_apogee, predicted_apogee, dt)
             self.current_airbrake = self.calculate_drag_adjustment(
                 pid_output, velocity, height, self.current_airbrake
@@ -403,28 +414,6 @@ class AirbrakeController:
             self.command_airbrakes(self.current_airbrake)
 
         return self.current_airbrake
-
-    def read_csv_data(self, csv_path):
-        """
-        Generator that yields sensor data from CSV file.
-
-        Expected CSV columns (raw sensor data):
-            time        - Timestamp in seconds
-            pressure    - BMP390 pressure reading in Pascals
-            gyro_x      - ICM-42688-P X-axis angular rate (raw or deg/s)
-            gyro_y      - ICM-42688-P Y-axis angular rate (raw or deg/s)
-            gyro_z      - ICM-42688-P Z-axis angular rate (raw or deg/s)
-        """
-        with open(csv_path, 'r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                yield {
-                    'time': float(row.get('time', 0)),
-                    'pressure': float(row.get('pressure', GROUND_PRESSURE_PA)),
-                    'gyro_x': float(row.get('gyro_x', 0)),
-                    'gyro_y': float(row.get('gyro_y', 0)),
-                    'gyro_z': float(row.get('gyro_z', 0))
-                }
 
     def process_sensors(self, sensor_data):
         """
@@ -456,7 +445,9 @@ class AirbrakeController:
     def integrate_gyroscope(self, gyro_x, gyro_y, dt):
         """
         Integrate gyroscope readings to find tilt off-axis.
-        Combines X and Y rotation into total tilt angle.
+        Integrates X and Y components separately, then computes total tilt
+        as the magnitude. This allows tilt to decrease if the rocket
+        oscillates back toward vertical.
 
         Args:
             gyro_x: Angular rate around X-axis (deg/s)
@@ -466,11 +457,9 @@ class AirbrakeController:
         Returns:
             Integrated tilt angle in degrees
         """
-        # Integrate angular rates to get angle change
-        # Total tilt rate is the magnitude of X and Y components
-        tilt_rate = math.sqrt(gyro_x**2 + gyro_y**2)
-        delta_angle = tilt_rate * dt
-        self.integrated_tilt += delta_angle
+        self.integrated_tilt_x += gyro_x * dt
+        self.integrated_tilt_y += gyro_y * dt
+        self.integrated_tilt = math.sqrt(self.integrated_tilt_x**2 + self.integrated_tilt_y**2)
         return self.integrated_tilt
 
     def check_failsafes(self, current_velocity):
@@ -503,7 +492,7 @@ class AirbrakeController:
 
         for _ in range(20):
             mid = (lo + hi) / 2.0
-            predicted_apogee = rocket_sim(height, velocity, tilt, mid)
+            predicted_apogee = rocket_sim(height, velocity, tilt, mid, self.ground_pressure)
             if predicted_apogee >= self.target_apogee:
                 lo = mid   # this deployment still undershoots drag, can add more
             else:
@@ -535,7 +524,7 @@ class AirbrakeController:
             New deployment percentage (0.0 to 1.0)
         """
         # Calculate current drag force
-        current_drag = deployment_to_drag(current_deployment, current_velocity, current_altitude)
+        current_drag = deployment_to_drag(current_deployment, current_velocity, current_altitude, self.ground_pressure)
 
         # Scale PID output to drag force adjustment
         # PID output is based on apogee error (meters)
@@ -548,145 +537,9 @@ class AirbrakeController:
         target_drag = max(0.0, target_drag)
 
         # Convert target drag force to deployment percentage
-        new_deployment = drag_force_to_deployment(target_drag, current_velocity, current_altitude)
+        new_deployment = drag_force_to_deployment(target_drag, current_velocity, current_altitude, self.ground_pressure)
 
         return new_deployment
-
-    def run(self, csv_path):
-        """
-        Main control loop. Reads sensor data from CSV and controls airbrakes.
-        """
-        print("Airbrake Controller Starting...")
-        print(f"Target Apogee: {self.target_apogee} m")
-        print(f"Ground Pressure: {self.ground_pressure} Pa")
-        print(f"Ground Temperature: {self.ground_temp} K")
-
-        previous_time = None
-
-        for raw_sensor_data in self.read_csv_data(csv_path):
-            current_time = raw_sensor_data['time']
-
-            # Calculate dt
-            if previous_time is not None:
-                dt = current_time - previous_time
-            else:
-                dt = DT
-            previous_time = current_time
-
-            # Update last data time for connection monitoring
-            self.last_data_time = current_time
-
-            # Process raw sensor data
-            sensor_data = self.process_sensors(raw_sensor_data)
-            altitude = sensor_data['altitude']
-
-            # Add to sensor buffer
-            self.sensor_buffer.add(
-                altitude,
-                (sensor_data['gyro_x'], sensor_data['gyro_y'], sensor_data['gyro_z']),
-                current_time
-            )
-
-            # Integrate gyroscope data (during all phases after launch)
-            if self.launched:
-                self.integrate_gyroscope(
-                    sensor_data['gyro_x'],
-                    sensor_data['gyro_y'],
-                    dt
-                )
-
-            # Get calculated acceleration (from altitude derivatives)
-            calculated_accel = self.sensor_buffer.get_acceleration()
-
-            # Phase: Pre-launch - wait for launch detection
-            if self.phase == "pre_launch":
-                if self.sensor_buffer.is_ready() and calculated_accel > LAUNCH_ACCEL_THRESHOLD:
-                    self.phase = "launch"
-                    self.launched = True
-                    print(f"[{current_time:.2f}s] Launch detected! (accel={calculated_accel:.1f} m/s²)")
-                    print(f"[{current_time:.2f}s] Beginning gyroscope integration.")
-                continue
-
-            # Phase: Launch - integrate gyroscope, wait for coast phase
-            if self.phase == "launch":
-                if calculated_accel < 0:  # Negative acceleration = coast
-                    self.phase = "coast_init"
-                    print(f"[{current_time:.2f}s] Coast phase detected (accel={calculated_accel:.1f} m/s²). Initializing control.")
-                continue
-
-            # Phase: Coast initialization - gather 3 data points after coast start
-            if self.phase == "coast_init":
-                if self.sensor_buffer.is_ready():
-                    self.phase = "coast_active"
-                    print(f"[{current_time:.2f}s] Sensor buffer ready. Starting active control.")
-
-                    # Get current state
-                    height = altitude
-                    velocity = self.sensor_buffer.get_velocity()
-                    tilt = self.integrated_tilt
-
-                    print(f"[{current_time:.2f}s] State: h={height:.1f}m, v={velocity:.1f}m/s, tilt={tilt:.1f}°")
-
-                    # Run initial simulation with no brakes
-                    predicted_apogee = rocket_sim(height, velocity, tilt, 0.0)
-                    print(f"[{current_time:.2f}s] Predicted apogee (no brakes): {predicted_apogee:.2f} m")
-
-                    if predicted_apogee <= self.target_apogee:
-                        print(f"[{current_time:.2f}s] Predicted apogee too low. Not deploying brakes.")
-                        self.current_airbrake = AIRBRAKE_MIN
-                    else:
-                        print(f"[{current_time:.2f}s] Predicted apogee > target. Running adjustment loop.")
-                        self.current_airbrake = self.airbrake_adjustment_loop(
-                            height, velocity, tilt
-                        )
-                        print(f"[{current_time:.2f}s] Initial airbrake deployment: {self.current_airbrake:.1%}")
-                        self.command_airbrakes(self.current_airbrake)
-                continue
-
-            # Phase: Active coast control (Main Loop)
-            if self.phase == "coast_active":
-                # Get current state from sensor buffer
-                height = altitude
-                velocity = self.sensor_buffer.get_velocity()
-                acceleration = self.sensor_buffer.get_acceleration()
-                tilt = self.integrated_tilt
-
-                # Check for apogee (velocity <= 0)
-                if velocity <= 0:
-                    print(f"[{current_time:.2f}s] Apogee reached at {height:.2f} m. Retracting airbrakes.")
-                    self.current_airbrake = AIRBRAKE_MIN
-                    self.command_airbrakes(self.current_airbrake)
-                    break
-
-                # Check failsafes
-                should_retract, message = self.check_failsafes(velocity)
-                if should_retract:
-                    print(f"[{current_time:.2f}s] {message}")
-                    self.current_airbrake = AIRBRAKE_MIN
-                    self.command_airbrakes(self.current_airbrake)
-                    continue
-
-                # Predict apogee with current deployment
-                predicted_apogee = rocket_sim(height, velocity, tilt, self.current_airbrake)
-
-                # PID control: setpoint is target, measurement is predicted apogee
-                pid_output = self.pid.update(self.target_apogee, predicted_apogee, dt)
-
-                # Calculate new airbrake deployment based on PID output
-                self.current_airbrake = self.calculate_drag_adjustment(
-                    pid_output, velocity, height, self.current_airbrake
-                )
-
-                # Command airbrakes
-                self.command_airbrakes(self.current_airbrake)
-
-                # Log status (including drag force)
-                current_drag = deployment_to_drag(self.current_airbrake, velocity, height)
-                print(f"[{current_time:.2f}s] h={height:.1f}m v={velocity:.1f}m/s a={acceleration:.1f}m/s² "
-                      f"pred={predicted_apogee:.1f}m brake={self.current_airbrake:.1%} drag={current_drag:.1f}N tilt={tilt:.1f}°")
-
-        print("Controller finished.")
-        return self.current_airbrake
 
     def command_airbrakes(self, deployment):
         """
@@ -707,14 +560,15 @@ class AirbrakeController:
 # -----------------------------------------------------------------------------
 
 def run_from_csv(csv_path, target_apogee=TARGET_APOGEE,
-                 ground_pressure=GROUND_PRESSURE_PA, ground_temp=GROUND_TEMP_K):
+                 ground_pressure=None, ground_temp=GROUND_TEMP_K):
     """
     Convenience function to run controller from CSV file.
+    CSV must include a 'phase' column ("boost" or "coast").
 
     Args:
         csv_path: Path to sensor data CSV
         target_apogee: Target apogee in meters
-        ground_pressure: Calibrated ground pressure in Pascals
+        ground_pressure: Ground pressure in Pa (None = auto-calibrate from first reading)
         ground_temp: Ground temperature in Kelvin
     """
     controller = AirbrakeController(
@@ -722,7 +576,27 @@ def run_from_csv(csv_path, target_apogee=TARGET_APOGEE,
         ground_pressure=ground_pressure,
         ground_temp=ground_temp
     )
-    return controller.run(csv_path)
+
+    print("Airbrake Controller Starting...")
+    print(f"Target Apogee: {target_apogee} m")
+    print(f"Ground Pressure: {'auto-calibrate' if ground_pressure is None else f'{ground_pressure} Pa'}")
+    print(f"Ground Temperature: {ground_temp} K")
+
+    with open(csv_path, 'r') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            sensor_data = {
+                'time': float(row.get('time', 0)),
+                'pressure': float(row.get('pressure', GROUND_PRESSURE_PA)),
+                'gyro_x': float(row.get('gyro_x', 0)),
+                'gyro_y': float(row.get('gyro_y', 0)),
+                'gyro_z': float(row.get('gyro_z', 0)),
+                'phase': row.get('phase', 'boost'),
+            }
+            controller.step(sensor_data)
+
+    print("Controller finished.")
+    return controller.current_airbrake
 
 
 if __name__ == "__main__":
@@ -731,17 +605,18 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python controller.py <sensor_data.csv> [target_apogee] [ground_pressure] [ground_temp]")
         print()
-        print("Expected CSV columns (raw sensor data):")
+        print("Expected CSV columns:")
         print("  time     - Timestamp in seconds")
         print("  pressure - BMP390 pressure in Pascals")
         print("  gyro_x   - ICM-42688-P X-axis angular rate (deg/s)")
         print("  gyro_y   - ICM-42688-P Y-axis angular rate (deg/s)")
         print("  gyro_z   - ICM-42688-P Z-axis angular rate (deg/s)")
+        print("  phase    - Flight phase: 'boost' or 'coast'")
         sys.exit(1)
 
     csv_file = sys.argv[1]
     target = float(sys.argv[2]) if len(sys.argv) > 2 else TARGET_APOGEE
-    pressure = float(sys.argv[3]) if len(sys.argv) > 3 else GROUND_PRESSURE_PA
+    pressure = float(sys.argv[3]) if len(sys.argv) > 3 else None
     temp = float(sys.argv[4]) if len(sys.argv) > 4 else GROUND_TEMP_K
 
     run_from_csv(csv_file, target, pressure, temp)

@@ -1,9 +1,13 @@
 """
 Simulated IMU for airbrake controller testing.
 
-Replays burn_data.csv through the controller (pre_launch -> launch phases),
+Replays burn_data.csv through the controller (boost phase),
 then simulates coast phase with synthetic BMP390/ICM-42688-P sensor data
 (Gaussian noise matched to datasheet specs) until apogee.
+
+The simulator passes the flight phase ("boost" or "coast") to the controller
+in each sensor packet, mirroring the real rocket architecture where the
+flight computer determines state.
 
 Usage:
     python simulated_imu.py                          # uses burn_data.csv, default target
@@ -26,7 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from controller import (
     AirbrakeController, TARGET_APOGEE,
-    GROUND_PRESSURE_PA, GROUND_TEMP_K,
+    GROUND_TEMP_K,
     DT, G, L, R,
     AIRBRAKE_CD, AIRBRAKE_AREA_MIN, AIRBRAKE_AREA_MAX,
     air_density, deployment_to_area
@@ -40,7 +44,7 @@ GYRO_NOISE_STD  = 0.07   # deg/s RMS  (ICM-42688-P)
 BARO_NOISE_STD  = 0.02   # Pa RMS     (BMP390)
 
 # Rocket mass (must match rocket_sim.py)
-MASS = 16.0  # kg
+MASS = 113.0  # kg
 
 
 # -----------------------------------------------------------------------------
@@ -64,7 +68,7 @@ def next_run_path(script_dir):
     return os.path.join(out_dir, f"run_{run_num:03d}.csv")
 
 
-def altitude_to_pressure(altitude, P0=GROUND_PRESSURE_PA, T0=GROUND_TEMP_K):
+def altitude_to_pressure(altitude, P0, T0=GROUND_TEMP_K):
     """
     Inverse of the barometric formula used in controller.py.
     Converts altitude (m) back to pressure (Pa).
@@ -81,8 +85,10 @@ def altitude_to_pressure(altitude, P0=GROUND_PRESSURE_PA, T0=GROUND_TEMP_K):
 def run_simulation(burn_csv_path, target_apogee=TARGET_APOGEE):
     """
     Run full flight simulation:
-      Phase 1 — Replay burn_data.csv through controller (burn phase).
+      Phase 1 — Replay burn_data.csv through controller (boost phase).
       Phase 2 — Simulate coast with synthetic IMU data until apogee.
+
+    The simulator passes phase="boost" or phase="coast" in each sensor packet.
 
     Args:
         burn_csv_path: Path to burn_data.csv
@@ -109,7 +115,7 @@ def run_simulation(burn_csv_path, target_apogee=TARGET_APOGEE):
     print("-" * 88)
 
     # -------------------------------------------------------------------------
-    # Phase 1: Burn replay
+    # Phase 1: Burn replay — pass phase="boost" to controller
     # -------------------------------------------------------------------------
     last_row = None
     with open(burn_csv_path, 'r') as f:
@@ -121,6 +127,7 @@ def run_simulation(burn_csv_path, target_apogee=TARGET_APOGEE):
                 'gyro_x':   float(row['gyro_x']),
                 'gyro_y':   float(row['gyro_y']),
                 'gyro_z':   float(row['gyro_z']),
+                'phase':    'boost',
             }
             controller.step(sensor_data)
             last_row = sensor_data
@@ -128,13 +135,13 @@ def run_simulation(burn_csv_path, target_apogee=TARGET_APOGEE):
             # Print burn state from sensor buffer (0% deployment during burn)
             buf_alt = controller.sensor_buffer.altitudes[-1] if controller.sensor_buffer.altitudes else 0.0
             buf_vel = controller.sensor_buffer.get_velocity()
-            rho_burn = air_density(buf_alt)
+            rho_burn = air_density(buf_alt, controller.ground_pressure)
             v_axial_burn = buf_vel / math.cos(math.radians(controller.integrated_tilt)) if buf_vel > 0 else 0.0
             drag_burn = 0.5 * rho_burn * v_axial_burn**2 * AIRBRAKE_CD * AIRBRAKE_AREA_MIN
-            print(f"{sensor_data['time']:7.2f}  {'BURN':>6}  {buf_alt:7.1f}  {buf_vel:7.1f}  {0.0:7.1f}  {drag_burn:8.2f}  {'---':>9}  {'---':>8}")
+            print(f"{sensor_data['time']:7.2f}  {'BOOST':>6}  {buf_alt:7.1f}  {buf_vel:7.1f}  {0.0:7.1f}  {drag_burn:8.2f}  {'---':>9}  {'---':>8}")
             rows.append({
                 'time_s': sensor_data['time'],
-                'phase': 'BURN',
+                'phase': 'BOOST',
                 'altitude_m': buf_alt,
                 'velocity_m_s': buf_vel,
                 'deployment_pct': 0.0,
@@ -153,7 +160,7 @@ def run_simulation(burn_csv_path, target_apogee=TARGET_APOGEE):
     burnout_tilt_deg = controller.integrated_tilt
 
     # -------------------------------------------------------------------------
-    # Phase 2: Coast simulation
+    # Phase 2: Coast simulation — pass phase="coast" to controller
     # -------------------------------------------------------------------------
 
     # Physics state (ground truth)
@@ -167,7 +174,7 @@ def run_simulation(burn_csv_path, target_apogee=TARGET_APOGEE):
 
     while v > 0:
         # --- Generate synthetic sensor readings ---
-        pressure_noisy = altitude_to_pressure(h) + random.gauss(0, BARO_NOISE_STD)
+        pressure_noisy = altitude_to_pressure(h, controller.ground_pressure) + random.gauss(0, BARO_NOISE_STD)
         gyro_x = random.gauss(0, GYRO_NOISE_STD)   # tilt fixed -> true rate = 0
         gyro_y = random.gauss(0, GYRO_NOISE_STD)
         gyro_z = random.gauss(0, GYRO_NOISE_STD)
@@ -178,6 +185,7 @@ def run_simulation(burn_csv_path, target_apogee=TARGET_APOGEE):
             'gyro_x':   gyro_x,
             'gyro_y':   gyro_y,
             'gyro_z':   gyro_z,
+            'phase':    'coast',
         }
 
         # --- Feed to controller, get deployment ---
@@ -188,7 +196,7 @@ def run_simulation(burn_csv_path, target_apogee=TARGET_APOGEE):
         v_axial = v / cos_tilt
 
         # --- Drag along rocket axis ---
-        rho    = air_density(h)
+        rho    = air_density(h, controller.ground_pressure)
         A      = deployment_to_area(deployment)
         F_drag = 0.5 * rho * v_axial**2 * AIRBRAKE_CD * A
 
@@ -205,7 +213,7 @@ def run_simulation(burn_csv_path, target_apogee=TARGET_APOGEE):
 
         apogee_h = max(apogee_h, h)
 
-        pred_apogee = rocket_sim(h, v, burnout_tilt_deg, deployment)
+        pred_apogee = rocket_sim(h, v, burnout_tilt_deg, deployment, controller.ground_pressure)
         error = pred_apogee - target_apogee
         print(f"{t:7.2f}  {'COAST':>6}  {h:7.1f}  {v:7.1f}  {deployment*100:7.1f}  {F_drag_vertical:8.2f}  {pred_apogee:9.1f}  {error:+8.1f}")
         rows.append({
@@ -247,7 +255,7 @@ def run_simulation(burn_csv_path, target_apogee=TARGET_APOGEE):
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
-    burn_csv = os.path.join(script_dir, "burn_data.csv")
+    burn_csv = os.path.join(script_dir, "comp_25_clean.csv")
     if len(sys.argv) > 1:
         burn_csv = sys.argv[1]
 
