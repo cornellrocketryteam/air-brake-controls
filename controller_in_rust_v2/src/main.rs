@@ -4,14 +4,14 @@ mod measure_tilt;
 mod rocket_sim;
 
 use controller::{
-    air_density, deployment_to_area, AirbrakeController, Phase, SensorData, AIRBRAKE_AREA_MIN,
-    AIRBRAKE_CD, DT, G, GROUND_TEMP_K, TARGET_APOGEE,
+    air_density, deployment_to_area, AirbrakeController, Phase, SensorData,
+    AIRBRAKE_AREA_MIN, AIRBRAKE_CD, DT, G, GROUND_TEMP_K, TARGET_APOGEE,
 };
 use gyro_calibration::{compute_drift, PAD_CALIBRATION_COUNT};
 use measure_tilt::measure_tilt;
 use rand::thread_rng;
 use rand_distr::{Distribution, Normal};
-use rocket_sim::{rocket_sim, BODY_CD, BODY_AREA};
+use rocket_sim::{BODY_CD, BODY_AREA};
 use std::env;
 use std::fs;
 
@@ -80,7 +80,7 @@ fn run_simulation(burn_csv_path: &str, target_apogee: f64, out_csv_path: &str) -
         accel_readings.push((accel_x, accel_y, accel_z));
 
         let sensor_data = SensorData { time, altitude: alt_m, gyro_x, gyro_y, phase: Phase::Pad };
-        controller.step(&sensor_data);
+        let _out = controller.step(&sensor_data);
         last_time = time;
 
         let gp = controller.ground_pressure;
@@ -138,9 +138,8 @@ fn run_simulation(burn_csv_path: &str, target_apogee: f64, out_csv_path: &str) -
         }
         let phase = if seen_coast { Phase::Coast } else { Phase::Boost };
 
-        let is_coast = seen_coast;
         let sensor_data = SensorData { time, altitude: alt_m, gyro_x, gyro_y, phase };
-        let deployment = controller.step(&sensor_data);
+        let out = controller.step(&sensor_data);
         last_time = time;
 
         let gp = controller.ground_pressure;
@@ -149,33 +148,31 @@ fn run_simulation(burn_csv_path: &str, target_apogee: f64, out_csv_path: &str) -
         let tilt_rad = controller.integrated_tilt.to_radians();
         let v_axial = if buf_vel > 0.0 { buf_vel / tilt_rad.cos().max(1e-6) } else { 0.0 };
         let rho = air_density(buf_alt, gp, GROUND_TEMP_K);
-        let a_area = deployment_to_area(deployment);
+        let a_area = deployment_to_area(out.deployment);
         let drag = 0.5 * rho * v_axial * v_axial * AIRBRAKE_CD * a_area;
 
         let phase_label = if state == "coast" { "COAST" } else { "BOOST" };
 
-        if is_coast && buf_vel > 0.0 {
-            let pred_apogee = rocket_sim(buf_alt, buf_vel, controller.integrated_tilt, deployment, gp);
-            let error = pred_apogee - target_apogee;
+        if seen_coast && buf_vel > 0.0 {
             println!(
                 "{:7.2}  {:>6}  {:7.1}  {:7.1}  {:7.1}  {:8.2}  {:9.1}  {:+8.1}",
-                time, phase_label, buf_alt, buf_vel, deployment * 100.0, drag, pred_apogee, error
+                time, phase_label, buf_alt, buf_vel, out.deployment * 100.0, drag, out.predicted_apogee, out.error
             );
             wtr.write_record([
                 format!("{:.4}", time), phase_label.to_string(),
                 format!("{:.3}", buf_alt), format!("{:.3}", buf_vel),
-                format!("{:.3}", deployment * 100.0), format!("{:.4}", drag),
-                format!("{:.3}", pred_apogee), format!("{:.3}", error),
+                format!("{:.3}", out.deployment * 100.0), format!("{:.4}", drag),
+                format!("{:.3}", out.predicted_apogee), format!("{:.3}", out.error),
             ]).unwrap();
         } else {
             println!(
                 "{:7.2}  {:>6}  {:7.1}  {:7.1}  {:7.1}  {:8.2}  {:>9}  {:>8}",
-                time, phase_label, buf_alt, buf_vel, deployment * 100.0, drag, "---", "---"
+                time, phase_label, buf_alt, buf_vel, out.deployment * 100.0, drag, "---", "---"
             );
             wtr.write_record([
                 format!("{:.4}", time), phase_label.to_string(),
                 format!("{:.3}", buf_alt), format!("{:.3}", buf_vel),
-                format!("{:.3}", deployment * 100.0), format!("{:.4}", drag),
+                format!("{:.3}", out.deployment * 100.0), format!("{:.4}", drag),
                 "".to_string(), "".to_string(),
             ]).unwrap();
         }
@@ -212,7 +209,7 @@ fn run_simulation(burn_csv_path: &str, target_apogee: f64, out_csv_path: &str) -
             phase: Phase::Coast,
         };
 
-        let deployment = controller.step(&sensor_data);
+        let out = controller.step(&sensor_data);
 
         let v_axial = v / cos_tilt;
         let rho = air_density(h, gp, GROUND_TEMP_K);
@@ -222,7 +219,7 @@ fn run_simulation(burn_csv_path: &str, target_apogee: f64, out_csv_path: &str) -
         let fd_body = dynamic_pressure * BODY_CD * BODY_AREA;
 
         // Airbrake drag
-        let a_area = deployment_to_area(deployment);
+        let a_area = deployment_to_area(out.deployment);
         let fd_brake = dynamic_pressure * AIRBRAKE_CD * a_area;
 
         let f_drag_vertical = (fd_body + fd_brake) * cos_tilt;
@@ -237,22 +234,19 @@ fn run_simulation(burn_csv_path: &str, target_apogee: f64, out_csv_path: &str) -
             apogee_h = h;
         }
 
-        let pred_apogee = rocket_sim(h, v, burnout_tilt_deg, deployment, gp);
-        let error = pred_apogee - target_apogee;
-
         println!(
             "{:7.2}  {:>6}  {:7.1}  {:7.1}  {:7.1}  {:8.2}  {:9.1}  {:+8.1}",
-            t, "COAST", h, v, deployment * 100.0, f_drag_vertical, pred_apogee, error
+            t, "COAST", h, v, out.deployment * 100.0, f_drag_vertical, out.predicted_apogee, out.error
         );
         wtr.write_record([
             format!("{:.4}", t),
             "COAST".to_string(),
             format!("{:.3}", h),
             format!("{:.3}", v),
-            format!("{:.3}", deployment * 100.0),
+            format!("{:.3}", out.deployment * 100.0),
             format!("{:.4}", f_drag_vertical),
-            format!("{:.3}", pred_apogee),
-            format!("{:.3}", error),
+            format!("{:.3}", out.predicted_apogee),
+            format!("{:.3}", out.error),
         ]).unwrap();
     }
 

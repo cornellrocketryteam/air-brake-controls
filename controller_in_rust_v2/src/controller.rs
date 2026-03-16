@@ -112,6 +112,15 @@ pub fn deployment_to_area(deployment: f64) -> f64 {
 }
 
 // -----------------------------------------------------------------------------
+// Controller output — returned every step
+// -----------------------------------------------------------------------------
+pub struct ControllerOutput {
+    pub deployment: f64,
+    pub predicted_apogee: f64,
+    pub error: f64,
+}
+
+// -----------------------------------------------------------------------------
 // Main controller
 // -----------------------------------------------------------------------------
 pub struct AirbrakeController {
@@ -185,7 +194,7 @@ impl AirbrakeController {
         lo.min(AIRBRAKE_MAX)
     }
 
-    pub fn step(&mut self, sensor_data: &SensorData) -> f64 {
+    pub fn step(&mut self, sensor_data: &SensorData) -> ControllerOutput {
         let current_time = sensor_data.time;
 
         if !self.ground_pressure_calibrated {
@@ -203,6 +212,8 @@ impl AirbrakeController {
 
         self.sensor_buffer.add(sensor_data.altitude, current_time);
         self.integrate_gyroscope(sensor_data.gyro_x, sensor_data.gyro_y, dt);
+
+        let mut predicted_apogee = 0.0;
 
         match sensor_data.phase {
             Phase::Pad => {}
@@ -228,22 +239,49 @@ impl AirbrakeController {
 
                 if self.coast_initialized && velocity <= 0.0 {
                     self.current_airbrake = AIRBRAKE_MIN;
-                    return self.current_airbrake;
+                    predicted_apogee = height;
+                    let error = predicted_apogee - self.target_apogee;
+                    println!(
+                        "[CTRL] t={:.2}s  deploy={:.1}%  pred={:.1}m  err={:+.1}m",
+                        current_time, self.current_airbrake * 100.0, predicted_apogee, error
+                    );
+                    return ControllerOutput {
+                        deployment: self.current_airbrake,
+                        predicted_apogee,
+                        error,
+                    };
                 }
 
                 if tilt > MAX_TILT_DEG {
-                    println!(
-                        "[{:.2}s] FAILSAFE: Tilt {:.1}° exceeds {:.1}°. Retracting.",
-                        current_time, tilt, MAX_TILT_DEG
-                    );
                     self.current_airbrake = AIRBRAKE_MIN;
-                    return self.current_airbrake;
+                    predicted_apogee = rocket_sim(height, velocity, tilt, self.current_airbrake, self.ground_pressure);
+                    let error = predicted_apogee - self.target_apogee;
+                    println!(
+                        "[CTRL] t={:.2}s  FAILSAFE tilt={:.1}°  deploy={:.1}%  pred={:.1}m  err={:+.1}m",
+                        current_time, tilt, self.current_airbrake * 100.0, predicted_apogee, error
+                    );
+                    return ControllerOutput {
+                        deployment: self.current_airbrake,
+                        predicted_apogee,
+                        error,
+                    };
                 }
 
                 self.current_airbrake = self.find_optimal_deployment(height, velocity, tilt);
+                predicted_apogee = rocket_sim(height, velocity, tilt, self.current_airbrake, self.ground_pressure);
+                let error = predicted_apogee - self.target_apogee;
+                println!(
+                    "[CTRL] t={:.2}s  deploy={:.1}%  pred={:.1}m  err={:+.1}m",
+                    current_time, self.current_airbrake * 100.0, predicted_apogee, error
+                );
             }
         }
 
-        self.current_airbrake
+        let error = predicted_apogee - self.target_apogee;
+        ControllerOutput {
+            deployment: self.current_airbrake,
+            predicted_apogee,
+            error,
+        }
     }
 }
