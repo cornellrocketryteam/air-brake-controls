@@ -1,3 +1,4 @@
+pub mod airbrakes;
 mod controller;
 mod gyro_calibration;
 mod measure_tilt;
