@@ -28,11 +28,11 @@
 
 Controller maxes brakes at 100%. Airbrake area is the limiting factor — can't fully close the 584 m gap but gets within 64 m.
 
-### comp_25 / full_comp_25 (target 2750 m)
+### comp_24 / full_comp_24 (target 2750 m)
 | Run | Target | Apogee | Error |
 |-----|--------|--------|-------|
-| full_comp_25 (replay) | 2750 m | 2800 m | +30 m |
-| comp_25 (closed-loop sim) | 2750 m | 2762 m | +12 m (+0.43%) |
+| full_comp_24 (replay) | 2750 m | 2800 m | +30 m |
+| comp_24 (closed-loop sim) | 2750 m | 2762 m | +12 m (+0.43%) |
 
 Controller actively modulates deployment (seen oscillating between 90-100%) to hit target. Real no-brakes apogee ~2800 m (9188 ft).
 
