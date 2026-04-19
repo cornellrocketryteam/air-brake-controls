@@ -1,5 +1,10 @@
-use std::collections::VecDeque;
+use heapless::Deque;
+use num_traits::Float;
+
 use crate::rocket_sim::rocket_sim;
+
+/// Fixed window length for the rolling sensor buffer.
+const SENSOR_BUFFER_SIZE: usize = 10;
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -43,31 +48,29 @@ pub struct SensorData {
 // Sensor buffer — rolling window of last 3 readings
 // -----------------------------------------------------------------------------
 pub struct SensorBuffer {
-    altitudes: VecDeque<f64>,
-    timestamps: VecDeque<f64>,
-    size: usize,
+    altitudes: Deque<f64, SENSOR_BUFFER_SIZE>,
+    timestamps: Deque<f64, SENSOR_BUFFER_SIZE>,
 }
 
 impl SensorBuffer {
-    pub fn new(size: usize) -> Self {
+    pub fn new() -> Self {
         SensorBuffer {
-            altitudes: VecDeque::with_capacity(size + 1),
-            timestamps: VecDeque::with_capacity(size + 1),
-            size,
+            altitudes: Deque::new(),
+            timestamps: Deque::new(),
         }
     }
 
     pub fn add(&mut self, altitude: f64, timestamp: f64) {
-        if self.altitudes.len() >= self.size {
+        if self.altitudes.len() >= SENSOR_BUFFER_SIZE {
             self.altitudes.pop_front();
             self.timestamps.pop_front();
         }
-        self.altitudes.push_back(altitude);
-        self.timestamps.push_back(timestamp);
+        let _ = self.altitudes.push_back(altitude);
+        let _ = self.timestamps.push_back(timestamp);
     }
 
     pub fn is_ready(&self) -> bool {
-        self.altitudes.len() >= self.size
+        self.altitudes.len() >= SENSOR_BUFFER_SIZE
     }
 
     /// Velocity via least-squares linear fit over all buffered points.
@@ -84,9 +87,9 @@ impl SensorBuffer {
 
         let mut num = 0.0;
         let mut den = 0.0;
-        for i in 0..n {
-            let dt = self.timestamps[i] - t_mean;
-            num += dt * (self.altitudes[i] - h_mean);
+        for (&t, &h) in self.timestamps.iter().zip(self.altitudes.iter()) {
+            let dt = t - t_mean;
+            num += dt * (h - h_mean);
             den += dt * dt;
         }
 
@@ -95,6 +98,12 @@ impl SensorBuffer {
 
     pub fn last_altitude(&self) -> f64 {
         self.altitudes.back().copied().unwrap_or(0.0)
+    }
+}
+
+impl Default for SensorBuffer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -146,7 +155,7 @@ impl AirbrakeController {
             ground_pressure: 0.0,
             ground_temp,
             ground_pressure_calibrated: false,
-            sensor_buffer: SensorBuffer::new(10),
+            sensor_buffer: SensorBuffer::new(),
             current_airbrake: 0.0,
             beginning_tilt: 0.0,
             integrated_tilt_x: 0.0,
@@ -201,10 +210,6 @@ impl AirbrakeController {
             self.ground_pressure = SEA_LEVEL_PRESSURE_PA
                 * (1.0 - sensor_data.altitude / 44330.0).powf(1.0 / 0.1903);
             self.ground_pressure_calibrated = true;
-            println!(
-                "[{:.2}s] Ground pressure calibrated: {:.1} Pa (from altitude {:.1} m)",
-                current_time, self.ground_pressure, sensor_data.altitude
-            );
         }
 
         let dt = self.previous_time.map_or(DT, |pt| current_time - pt);
@@ -241,10 +246,6 @@ impl AirbrakeController {
                     self.current_airbrake = AIRBRAKE_MIN;
                     predicted_apogee = height;
                     let error = predicted_apogee - self.target_apogee;
-                    println!(
-                        "[CTRL] t={:.2}s  deploy={:.1}%  pred={:.1}m  err={:+.1}m",
-                        current_time, self.current_airbrake * 100.0, predicted_apogee, error
-                    );
                     return ControllerOutput {
                         deployment: self.current_airbrake,
                         predicted_apogee,
@@ -256,10 +257,6 @@ impl AirbrakeController {
                     self.current_airbrake = AIRBRAKE_MIN;
                     predicted_apogee = rocket_sim(height, velocity, tilt, self.current_airbrake, self.ground_pressure);
                     let error = predicted_apogee - self.target_apogee;
-                    println!(
-                        "[CTRL] t={:.2}s  FAILSAFE tilt={:.1}°  deploy={:.1}%  pred={:.1}m  err={:+.1}m",
-                        current_time, tilt, self.current_airbrake * 100.0, predicted_apogee, error
-                    );
                     return ControllerOutput {
                         deployment: self.current_airbrake,
                         predicted_apogee,
@@ -269,11 +266,6 @@ impl AirbrakeController {
 
                 self.current_airbrake = self.find_optimal_deployment(height, velocity, tilt);
                 predicted_apogee = rocket_sim(height, velocity, tilt, self.current_airbrake, self.ground_pressure);
-                let error = predicted_apogee - self.target_apogee;
-                println!(
-                    "[CTRL] t={:.2}s  deploy={:.1}%  pred={:.1}m  err={:+.1}m",
-                    current_time, self.current_airbrake * 100.0, predicted_apogee, error
-                );
             }
         }
 

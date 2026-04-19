@@ -3,7 +3,22 @@ name = "controller_in_rust"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "controller_in_rust"
+path = "src/lib.rs"
+
+[[bin]]
+name = "controller_in_rust"
+path = "src/main.rs"
+required-features = ["sim"]
+
 [dependencies]
-csv = "1.3"
-rand = "0.8"
-rand_distr = "0.4"
+heapless = "0.8"
+num-traits = { version = "0.2", default-features = false, features = ["libm"] }
+csv = { version = "1.3", optional = true }
+rand = { version = "0.8", optional = true }
+rand_distr = { version = "0.4", optional = true }
+
+[features]
+default = ["sim"]
+sim = ["csv", "rand", "rand_distr"]

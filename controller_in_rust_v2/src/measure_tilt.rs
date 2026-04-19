@@ -8,6 +8,8 @@
 ///   tilt_x = atan2(ax, az)
 ///   tilt_y = atan2(ay, az)
 
+use num_traits::Float;
+
 pub struct BeginningTilt {
     pub x_deg: f64,
     pub y_deg: f64,

@@ -1,7 +1,9 @@
+use num_traits::Float;
+
 // Rocket body aerodynamics (6-inch diameter)
 pub const BODY_CD: f64 = 0.5;
 pub const BODY_DIAMETER: f64 = 0.1524;                                    // 6 inches in metres
-pub const BODY_AREA: f64 = std::f64::consts::PI * (BODY_DIAMETER / 2.0) * (BODY_DIAMETER / 2.0); // ~0.01824 m²
+pub const BODY_AREA: f64 = core::f64::consts::PI * (BODY_DIAMETER / 2.0) * (BODY_DIAMETER / 2.0); // ~0.01824 m²
 
 /// Simulates coast phase from given conditions and returns predicted apogee (m).
 pub fn rocket_sim(x: f64, v: f64, tilt_deg: f64, airbrake: f64, ground_pressure: f64) -> f64 {
