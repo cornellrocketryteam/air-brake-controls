@@ -1,6 +1,9 @@
 use heapless::Deque;
 use crate::rocket_sim::rocket_sim;
 
+/// Fixed window length for the rolling sensor buffer.
+const SENSOR_BUFFER_SIZE: usize = 10;
+
 // -----------------------------------------------------------------------------
 // Constants
 // -----------------------------------------------------------------------------
@@ -96,6 +99,12 @@ impl SensorBuffer {
 
     pub fn last_altitude(&self) -> f32 {
         self.altitudes.back().copied().unwrap_or(0.0)
+    }
+}
+
+impl Default for SensorBuffer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

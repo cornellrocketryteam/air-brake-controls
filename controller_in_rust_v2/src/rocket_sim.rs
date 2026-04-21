@@ -1,3 +1,5 @@
+use num_traits::Float;
+
 // Rocket body aerodynamics (6-inch diameter)
 pub const BODY_CD: f32 = 0.5;
 pub const BODY_DIAMETER: f32 = 0.1524;                                       // 6 inches in metres
