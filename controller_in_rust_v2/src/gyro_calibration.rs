@@ -8,23 +8,19 @@
 pub const PAD_CALIBRATION_COUNT: usize = 40;
 
 pub struct GyroDriftRates {
-    pub x: f64,   // deg/s per second
-    pub y: f64,
+    pub x: f32,   // deg/s per second
+    pub y: f32,
 }
 
 /// `readings` must contain exactly `PAD_CALIBRATION_COUNT` (40) entries of
 /// (time_s, gyro_x, gyro_y) from the pad phase.
-pub fn compute_drift(readings: &[(f64, f64, f64)]) -> GyroDriftRates {
-    assert_eq!(
-        readings.len(),
-        PAD_CALIBRATION_COUNT,
-        "compute_drift requires exactly {} pad readings, got {}",
-        PAD_CALIBRATION_COUNT,
-        readings.len()
-    );
-    let n = readings.len();
+pub fn compute_drift(readings: &[(f32, f32, f32)]) -> GyroDriftRates {
+    if readings.len() != PAD_CALIBRATION_COUNT {
+        return GyroDriftRates { x: 0.0, y: 0.0 };
+    }
 
-    let (mut sum_x, mut sum_y) = (0.0f64, 0.0f64);
+    let n = readings.len();
+    let (mut sum_x, mut sum_y) = (0.0f32, 0.0f32);
     let mut valid_pairs = 0u32;
 
     for i in 0..(n - 1) {
@@ -40,7 +36,7 @@ pub fn compute_drift(readings: &[(f64, f64, f64)]) -> GyroDriftRates {
         return GyroDriftRates { x: 0.0, y: 0.0 };
     }
 
-    let n = valid_pairs as f64;
+    let n = valid_pairs as f32;
     GyroDriftRates {
         x: sum_x / n,
         y: sum_y / n,

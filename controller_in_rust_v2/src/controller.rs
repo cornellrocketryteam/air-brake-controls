@@ -1,22 +1,25 @@
-use std::collections::VecDeque;
+use heapless::Deque;
 use crate::rocket_sim::rocket_sim;
 
 // -----------------------------------------------------------------------------
 // Constants
 // -----------------------------------------------------------------------------
-pub const DT: f64 = 0.01;
-pub const TARGET_APOGEE: f64 = 3048.0;
-pub const R: f64 = 287.05;
-pub const G: f64 = 9.80665;
-pub const L: f64 = 0.0065;
-pub const GROUND_TEMP_K: f64 = 288.15;
-pub const AIRBRAKE_MIN: f64 = 0.0;
-pub const AIRBRAKE_MAX: f64 = 1.0;
-pub const AIRBRAKE_CD: f64 = 0.3;
-pub const AIRBRAKE_AREA_MIN: f64 = 0.001848;   // 2.86479 in²
-pub const AIRBRAKE_AREA_MAX: f64 = 0.021935;   // 34 in²
-pub const MAX_TILT_DEG: f64 = 50.0;
-pub const SEA_LEVEL_PRESSURE_PA: f64 = 101325.0;
+pub const DT: f32 = 0.01;
+pub const TARGET_APOGEE: f32 = 3048.0;
+pub const R: f32 = 287.05;
+pub const G: f32 = 9.80665;
+pub const L: f32 = 0.0065;
+pub const GROUND_TEMP_K: f32 = 288.15;
+pub const AIRBRAKE_MIN: f32 = 0.0;
+pub const AIRBRAKE_MAX: f32 = 1.0;
+pub const AIRBRAKE_CD: f32 = 0.3;
+pub const AIRBRAKE_AREA_MIN: f32 = 0.001848;   // 2.86479 in²
+pub const AIRBRAKE_AREA_MAX: f32 = 0.021935;   // 34 in²
+pub const MAX_TILT_DEG: f32 = 50.0;
+pub const SEA_LEVEL_PRESSURE_PA: f32 = 101325.0;
+
+// Velocity buffer window — must match the const generic on SensorBuffer
+const SENSOR_BUFFER_SIZE: usize = 10;
 
 // -----------------------------------------------------------------------------
 // Flight phase — passed in by the flight computer / simulator
@@ -32,68 +35,66 @@ pub enum Phase {
 // Sensor data packet (barometer + gyroscope)
 // -----------------------------------------------------------------------------
 pub struct SensorData {
-    pub time: f64,
-    pub altitude: f64,
-    pub gyro_x: f64,
-    pub gyro_y: f64,
+    pub time: f32,
+    pub altitude: f32,
+    pub gyro_x: f32,
+    pub gyro_y: f32,
     pub phase: Phase,
 }
 
 // -----------------------------------------------------------------------------
-// Sensor buffer — rolling window of last 3 readings
+// Sensor buffer — rolling window of the last SENSOR_BUFFER_SIZE readings
+// Uses heapless::Deque so no heap allocator is required.
 // -----------------------------------------------------------------------------
 pub struct SensorBuffer {
-    altitudes: VecDeque<f64>,
-    timestamps: VecDeque<f64>,
-    size: usize,
+    altitudes:  Deque<f32, SENSOR_BUFFER_SIZE>,
+    timestamps: Deque<f32, SENSOR_BUFFER_SIZE>,
 }
 
 impl SensorBuffer {
-    pub fn new(size: usize) -> Self {
+    pub fn new() -> Self {
         SensorBuffer {
-            altitudes: VecDeque::with_capacity(size + 1),
-            timestamps: VecDeque::with_capacity(size + 1),
-            size,
+            altitudes:  Deque::new(),
+            timestamps: Deque::new(),
         }
     }
 
-    pub fn add(&mut self, altitude: f64, timestamp: f64) {
-        if self.altitudes.len() >= self.size {
+    pub fn add(&mut self, altitude: f32, timestamp: f32) {
+        if self.altitudes.is_full() {
             self.altitudes.pop_front();
             self.timestamps.pop_front();
         }
-        self.altitudes.push_back(altitude);
-        self.timestamps.push_back(timestamp);
+        let _ = self.altitudes.push_back(altitude);
+        let _ = self.timestamps.push_back(timestamp);
     }
 
     pub fn is_ready(&self) -> bool {
-        self.altitudes.len() >= self.size
+        self.altitudes.is_full()
     }
 
     /// Velocity via least-squares linear fit over all buffered points.
     /// slope = Σ((t_i - t̄)(h_i - h̄)) / Σ((t_i - t̄)²)
-    pub fn get_velocity(&self) -> f64 {
+    pub fn get_velocity(&self) -> f32 {
         let n = self.altitudes.len();
         if n < 2 {
             return 0.0;
         }
+        let n_f = n as f32;
+        let t_mean: f32 = self.timestamps.iter().sum::<f32>() / n_f;
+        let h_mean: f32 = self.altitudes.iter().sum::<f32>() / n_f;
 
-        let n_f = n as f64;
-        let t_mean: f64 = self.timestamps.iter().sum::<f64>() / n_f;
-        let h_mean: f64 = self.altitudes.iter().sum::<f64>() / n_f;
-
-        let mut num = 0.0;
-        let mut den = 0.0;
-        for i in 0..n {
-            let dt = self.timestamps[i] - t_mean;
-            num += dt * (self.altitudes[i] - h_mean);
+        let mut num = 0.0f32;
+        let mut den = 0.0f32;
+        for (t, a) in self.timestamps.iter().zip(self.altitudes.iter()) {
+            let dt = t - t_mean;
+            num += dt * (a - h_mean);
             den += dt * dt;
         }
 
         if den > 0.0 { num / den } else { 0.0 }
     }
 
-    pub fn last_altitude(&self) -> f64 {
+    pub fn last_altitude(&self) -> f32 {
         self.altitudes.back().copied().unwrap_or(0.0)
     }
 }
@@ -101,13 +102,13 @@ impl SensorBuffer {
 // -----------------------------------------------------------------------------
 // Aerodynamic helpers
 // -----------------------------------------------------------------------------
-pub fn air_density(altitude: f64, p0: f64, t0: f64) -> f64 {
+pub fn air_density(altitude: f32, p0: f32, t0: f32) -> f32 {
     let t = (t0 - L * altitude).max(1.0);
-    let p = p0 * (t / t0).powf(G / (R * L));
+    let p = p0 * libm::powf(t / t0, G / (R * L));
     (p / (R * t)).max(0.001)
 }
 
-pub fn deployment_to_area(deployment: f64) -> f64 {
+pub fn deployment_to_area(deployment: f32) -> f32 {
     AIRBRAKE_AREA_MIN + (AIRBRAKE_AREA_MAX - AIRBRAKE_AREA_MIN) * deployment
 }
 
@@ -115,38 +116,38 @@ pub fn deployment_to_area(deployment: f64) -> f64 {
 // Controller output — returned every step
 // -----------------------------------------------------------------------------
 pub struct ControllerOutput {
-    pub deployment: f64,
-    pub predicted_apogee: f64,
-    pub error: f64,
+    pub deployment: f32,
+    pub predicted_apogee: f32,
+    pub error: f32,
 }
 
 // -----------------------------------------------------------------------------
 // Main controller
 // -----------------------------------------------------------------------------
 pub struct AirbrakeController {
-    pub target_apogee: f64,
-    pub ground_pressure: f64,
-    pub ground_temp: f64,
+    pub target_apogee: f32,
+    pub ground_pressure: f32,
+    pub ground_temp: f32,
     ground_pressure_calibrated: bool,
     pub sensor_buffer: SensorBuffer,
-    pub current_airbrake: f64,
-    pub beginning_tilt: f64,
-    pub integrated_tilt_x: f64,
-    pub integrated_tilt_y: f64,
-    pub integrated_tilt: f64,
+    pub current_airbrake: f32,
+    pub beginning_tilt: f32,
+    pub integrated_tilt_x: f32,
+    pub integrated_tilt_y: f32,
+    pub integrated_tilt: f32,
     pub coast_initialized: bool,
-    previous_time: Option<f64>,
-    pub burnout_velocity: f64,
+    previous_time: Option<f32>,
+    pub burnout_velocity: f32,
 }
 
 impl AirbrakeController {
-    pub fn new(target_apogee: f64, ground_temp: f64) -> Self {
+    pub fn new(target_apogee: f32, ground_temp: f32) -> Self {
         AirbrakeController {
             target_apogee,
             ground_pressure: 0.0,
             ground_temp,
             ground_pressure_calibrated: false,
-            sensor_buffer: SensorBuffer::new(10),
+            sensor_buffer: SensorBuffer::new(),
             current_airbrake: 0.0,
             beginning_tilt: 0.0,
             integrated_tilt_x: 0.0,
@@ -158,23 +159,26 @@ impl AirbrakeController {
         }
     }
 
-    pub fn set_beginning_tilt(&mut self, tilt_x_deg: f64, tilt_y_deg: f64) {
+    pub fn set_beginning_tilt(&mut self, tilt_x_deg: f32, tilt_y_deg: f32) {
         self.integrated_tilt_x = tilt_x_deg;
-        self.integrated_tilt_y = tilt_y_deg;    
-        self.integrated_tilt = (tilt_x_deg * tilt_x_deg + tilt_y_deg * tilt_y_deg).sqrt();
+        self.integrated_tilt_y = tilt_y_deg;
+        self.integrated_tilt = libm::sqrtf(
+            tilt_x_deg * tilt_x_deg + tilt_y_deg * tilt_y_deg
+        );
         self.beginning_tilt = self.integrated_tilt;
     }
 
-    fn integrate_gyroscope(&mut self, gyro_x: f64, gyro_y: f64, dt: f64) {
+    fn integrate_gyroscope(&mut self, gyro_x: f32, gyro_y: f32, dt: f32) {
         self.integrated_tilt_x += gyro_x * dt;
         self.integrated_tilt_y += gyro_y * dt;
-        self.integrated_tilt = (self.integrated_tilt_x * self.integrated_tilt_x
-            + self.integrated_tilt_y * self.integrated_tilt_y)
-            .sqrt();
+        self.integrated_tilt = libm::sqrtf(
+            self.integrated_tilt_x * self.integrated_tilt_x
+            + self.integrated_tilt_y * self.integrated_tilt_y
+        );
     }
 
     /// Binary search (20 iters) for deployment that hits target apogee.
-    fn find_optimal_deployment(&self, height: f64, velocity: f64, tilt_deg: f64) -> f64 {
+    fn find_optimal_deployment(&self, height: f32, velocity: f32, tilt_deg: f32) -> f32 {
         let predicted_no_brakes = rocket_sim(height, velocity, tilt_deg, 0.0, self.ground_pressure);
         if predicted_no_brakes <= self.target_apogee {
             return AIRBRAKE_MIN;
@@ -199,12 +203,8 @@ impl AirbrakeController {
 
         if !self.ground_pressure_calibrated {
             self.ground_pressure = SEA_LEVEL_PRESSURE_PA
-                * (1.0 - sensor_data.altitude / 44330.0).powf(1.0 / 0.1903);
+                * libm::powf(1.0 - sensor_data.altitude / 44330.0, 1.0 / 0.1903);
             self.ground_pressure_calibrated = true;
-            println!(
-                "[{:.2}s] Ground pressure calibrated: {:.1} Pa (from altitude {:.1} m)",
-                current_time, self.ground_pressure, sensor_data.altitude
-            );
         }
 
         let dt = self.previous_time.map_or(DT, |pt| current_time - pt);
@@ -213,7 +213,7 @@ impl AirbrakeController {
         self.sensor_buffer.add(sensor_data.altitude, current_time);
         self.integrate_gyroscope(sensor_data.gyro_x, sensor_data.gyro_y, dt);
 
-        let mut predicted_apogee = 0.0;
+        let mut predicted_apogee = 0.0f32;
 
         match sensor_data.phase {
             Phase::Pad => {}
@@ -241,10 +241,6 @@ impl AirbrakeController {
                     self.current_airbrake = AIRBRAKE_MIN;
                     predicted_apogee = height;
                     let error = predicted_apogee - self.target_apogee;
-                    println!(
-                        "[CTRL] t={:.2}s  deploy={:.1}%  pred={:.1}m  err={:+.1}m",
-                        current_time, self.current_airbrake * 100.0, predicted_apogee, error
-                    );
                     return ControllerOutput {
                         deployment: self.current_airbrake,
                         predicted_apogee,
@@ -256,10 +252,6 @@ impl AirbrakeController {
                     self.current_airbrake = AIRBRAKE_MIN;
                     predicted_apogee = rocket_sim(height, velocity, tilt, self.current_airbrake, self.ground_pressure);
                     let error = predicted_apogee - self.target_apogee;
-                    println!(
-                        "[CTRL] t={:.2}s  FAILSAFE tilt={:.1}°  deploy={:.1}%  pred={:.1}m  err={:+.1}m",
-                        current_time, tilt, self.current_airbrake * 100.0, predicted_apogee, error
-                    );
                     return ControllerOutput {
                         deployment: self.current_airbrake,
                         predicted_apogee,
@@ -269,11 +261,6 @@ impl AirbrakeController {
 
                 self.current_airbrake = self.find_optimal_deployment(height, velocity, tilt);
                 predicted_apogee = rocket_sim(height, velocity, tilt, self.current_airbrake, self.ground_pressure);
-                let error = predicted_apogee - self.target_apogee;
-                println!(
-                    "[CTRL] t={:.2}s  deploy={:.1}%  pred={:.1}m  err={:+.1}m",
-                    current_time, self.current_airbrake * 100.0, predicted_apogee, error
-                );
             }
         }
 

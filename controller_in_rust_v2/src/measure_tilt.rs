@@ -9,22 +9,24 @@
 ///   tilt_y = atan2(ay, az)
 
 pub struct BeginningTilt {
-    pub x_deg: f64,
-    pub y_deg: f64,
+    pub x_deg: f32,
+    pub y_deg: f32,
 }
 
 /// `readings` is a slice of (accel_x, accel_y, accel_z) in g's.
 /// Returns the x and y tilt components in degrees.
-pub fn measure_tilt(readings: &[(f64, f64, f64)]) -> BeginningTilt {
-    assert!(!readings.is_empty(), "measure_tilt requires at least one reading");
+pub fn measure_tilt(readings: &[(f32, f32, f32)]) -> BeginningTilt {
+    if readings.is_empty() {
+        return BeginningTilt { x_deg: 0.0, y_deg: 0.0 };
+    }
 
-    let n = readings.len() as f64;
-    let ax = readings.iter().map(|r| r.0).sum::<f64>() / n;
-    let ay = readings.iter().map(|r| r.1).sum::<f64>() / n;
-    let az = readings.iter().map(|r| r.2).sum::<f64>() / n;
+    let n = readings.len() as f32;
+    let ax = readings.iter().map(|r| r.0).sum::<f32>() / n;
+    let ay = readings.iter().map(|r| r.1).sum::<f32>() / n;
+    let az = readings.iter().map(|r| r.2).sum::<f32>() / n;
 
     BeginningTilt {
-        x_deg: ax.atan2(az).to_degrees(),
-        y_deg: ay.atan2(az).to_degrees(),
+        x_deg: libm::atan2f(ax, az).to_degrees(),
+        y_deg: libm::atan2f(ay, az).to_degrees(),
     }
 }

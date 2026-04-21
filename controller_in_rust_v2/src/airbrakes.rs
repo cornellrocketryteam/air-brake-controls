@@ -1,19 +1,20 @@
+use heapless::Vec as HVec;
 use crate::controller::{AirbrakeController, Phase, SensorData, GROUND_TEMP_K, TARGET_APOGEE};
 use crate::gyro_calibration::{compute_drift, PAD_CALIBRATION_COUNT};
 use crate::measure_tilt::measure_tilt;
 
 pub struct AirbrakeOutput {
-    pub deployment: f64,
-    pub predicted_apogee: f64,
-    pub error: f64,
+    pub deployment: f32,
+    pub predicted_apogee: f32,
+    pub error: f32,
 }
 
 pub struct AirbrakeSystem {
     controller: AirbrakeController,
-    pad_gyro_readings: Vec<(f64, f64, f64)>,
-    pad_accel_readings: Vec<(f64, f64, f64)>,
-    drift_x: f64,
-    drift_y: f64,
+    pad_gyro_readings: HVec<(f32, f32, f32), PAD_CALIBRATION_COUNT>,
+    pad_accel_readings: HVec<(f32, f32, f32), PAD_CALIBRATION_COUNT>,
+    drift_x: f32,
+    drift_y: f32,
     calibrated: bool,
 }
 
@@ -21,8 +22,8 @@ impl AirbrakeSystem {
     pub fn new() -> Self {
         AirbrakeSystem {
             controller: AirbrakeController::new(TARGET_APOGEE, GROUND_TEMP_K),
-            pad_gyro_readings: Vec::with_capacity(PAD_CALIBRATION_COUNT),
-            pad_accel_readings: Vec::with_capacity(PAD_CALIBRATION_COUNT),
+            pad_gyro_readings: HVec::new(),
+            pad_accel_readings: HVec::new(),
             drift_x: 0.0,
             drift_y: 0.0,
             calibrated: false,
@@ -33,19 +34,19 @@ impl AirbrakeSystem {
     /// Returns deployment level (0.0–1.0), predicted apogee, and error.
     pub fn execute(
         &mut self,
-        time: f64,
-        altitude: f64,
-        gyro_x: f64,
-        gyro_y: f64,
-        accel_x: f64,
-        accel_y: f64,
-        accel_z: f64,
+        time: f32,
+        altitude: f32,
+        gyro_x: f32,
+        gyro_y: f32,
+        accel_x: f32,
+        accel_y: f32,
+        accel_z: f32,
         phase: Phase,
     ) -> AirbrakeOutput {
         // Collect calibration data during pad (only until we have 40 readings)
         if phase == Phase::Pad && !self.calibrated {
-            self.pad_gyro_readings.push((time, gyro_x, gyro_y));
-            self.pad_accel_readings.push((accel_x, accel_y, accel_z));
+            let _ = self.pad_gyro_readings.push((time, gyro_x, gyro_y));
+            let _ = self.pad_accel_readings.push((accel_x, accel_y, accel_z));
 
             if self.pad_gyro_readings.len() == PAD_CALIBRATION_COUNT {
                 let drift = compute_drift(&self.pad_gyro_readings);
