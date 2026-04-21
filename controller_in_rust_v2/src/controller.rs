@@ -21,9 +21,6 @@ pub const AIRBRAKE_AREA_MAX: f32 = 0.021935;   // 34 in²
 pub const MAX_TILT_DEG: f32 = 50.0;
 pub const SEA_LEVEL_PRESSURE_PA: f32 = 101325.0;
 
-// Velocity buffer window — must match the const generic on SensorBuffer
-const SENSOR_BUFFER_SIZE: usize = 10;
-
 // -----------------------------------------------------------------------------
 // Flight phase — passed in by the flight computer / simulator
 // -----------------------------------------------------------------------------

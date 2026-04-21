@@ -24,6 +24,8 @@ impl AirbrakeSystem {
             controller: AirbrakeController::new(TARGET_APOGEE, GROUND_TEMP_K),
             pad_gyro_readings: HVec::new(),
             pad_accel_readings: HVec::new(),
+            drift_x: 0.0,
+            drift_y: 0.0,
             calibrated: false,
         }
     }
