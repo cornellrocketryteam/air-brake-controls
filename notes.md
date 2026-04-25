@@ -1,1 +1,0 @@
-When flight software says bun ends tell code burn ends. add modes as a para.,
