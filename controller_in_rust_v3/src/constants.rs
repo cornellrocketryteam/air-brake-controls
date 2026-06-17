@@ -10,11 +10,11 @@ pub const T0_K: f32 = 288.15;
 pub const SEA_LEVEL_PRESSURE_PA: f32 = 101_325.0;
 
 // Vehicle (LV)
-pub const MASS_KG: f32 = 51.26; // 113 lb
+pub const MASS_KG: f32 = 52.62; // 116 lb
 pub const BODY_DIAMETER_M: f32 = 0.1524; // 6 in
 pub const BODY_AREA_M2: f32 =
     core::f32::consts::PI * (BODY_DIAMETER_M * 0.5) * (BODY_DIAMETER_M * 0.5);
-pub const BODY_CD: f32 = 0.5;
+pub const BODY_CD: f32 = 0.52;
 
 // Airbrake aero
 pub const AIRBRAKE_CD: f32 = 0.3;

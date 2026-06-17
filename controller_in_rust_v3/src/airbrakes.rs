@@ -33,7 +33,7 @@ impl AirbrakeSystem {
 
         let velocity_up = self
             .velocity
-            .update(input.altitude, input.time, input.vel_d);
+            .update(input.altitude, input.time);
         let tilt_deg = self
             .tilt
             .update(input.accel_x, input.accel_y, input.accel_z);
